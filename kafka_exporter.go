@@ -1,10 +1,7 @@
 package main
 
 import (
-	"crypto/tls"
-	"crypto/x509"
 	"fmt"
-	"io/ioutil"
 	"log"
 	"net/http"
 	"os"
@@ -15,13 +12,16 @@ import (
 	"time"
 
 	"github.com/Shopify/sarama"
-	kazoo "github.com/krallistic/kazoo-go"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-	plog "github.com/prometheus/common/log"
+
+	"crypto/tls"
+	"crypto/x509"
+	"github.com/astaxie/beego/logs"
 	"github.com/prometheus/common/version"
 	"github.com/rcrowley/go-metrics"
-	"gopkg.in/alecthomas/kingpin.v2"
+	"github.com/spf13/viper"
+	"io/ioutil"
 )
 
 const (
@@ -50,18 +50,17 @@ var (
 // Exporter collects Kafka stats from the given server and exports them using
 // the prometheus metrics package.
 type Exporter struct {
-	client                  sarama.Client
-	topicFilter             *regexp.Regexp
-	groupFilter             *regexp.Regexp
-	mu                      sync.Mutex
-	useZooKeeperLag         bool
-	zookeeperClient         *kazoo.Kazoo
+	client      sarama.Client
+	topicFilter *regexp.Regexp
+	groupFilter *regexp.Regexp
+	mu          sync.Mutex
+
 	nextMetadataRefresh     time.Time
 	metadataRefreshInterval time.Duration
 }
 
 type kafkaOpts struct {
-	uri                      []string
+	uri                      string
 	useSASL                  bool
 	useSASLHandshake         bool
 	saslUsername             string
@@ -73,10 +72,9 @@ type kafkaOpts struct {
 	tlsKeyFile               string
 	tlsInsecureSkipTLSVerify bool
 	kafkaVersion             string
-	useZooKeeperLag          bool
-	uriZookeeper             []string
-	labels                   string
-	metadataRefreshInterval  string
+
+	labels                  string
+	metadataRefreshInterval string
 }
 
 // CanReadCertAndKey returns true if the certificate and key files already exists,
@@ -115,14 +113,37 @@ func canReadFile(path string) bool {
 
 // NewExporter returns an initialized Exporter.
 func NewExporter(opts kafkaOpts, topicFilter string, groupFilter string) (*Exporter, error) {
-	var zookeeperClient *kazoo.Kazoo
+	//var zookeeperClient *kazoo.Kazoo
+
+	//if opts.useZooKeeperLag {
+	//	zookeeperClient, err = kazoo.NewKazoo(strings.Split(opts.uriZookeeper,","), nil)
+	//}
+
 	config := sarama.NewConfig()
 	config.ClientID = clientID
+
+	if opts.saslUsername != "" {
+		config.Net.SASL.User = opts.saslUsername
+		config.Net.SASL.Enable = true
+	} else {
+		config.Net.SASL.Enable = false
+	}
+
+	if opts.saslPassword != "" {
+		config.Net.SASL.Password = opts.saslPassword
+	}
+	interval, err := time.ParseDuration(opts.metadataRefreshInterval)
+	if err != nil {
+		logger.Error("Cannot parse metadata refresh interval")
+		panic(err)
+	}
+
 	kafkaVersion, err := sarama.ParseKafkaVersion(opts.kafkaVersion)
 	if err != nil {
 		return nil, err
 	}
 	config.Version = kafkaVersion
+	config.Metadata.RefreshFrequency = interval
 
 	if opts.useSASL {
 		// Convert to lowercase so that SHA512 and SHA256 is still valid
@@ -137,19 +158,11 @@ func NewExporter(opts kafkaOpts, topicFilter string, groupFilter string) (*Expor
 
 		case "plain":
 		default:
-			plog.Fatalf("invalid sasl mechanism \"%s\": can only be \"scram-sha256\", \"scram-sha512\" or \"plain\"", opts.saslMechanism)
+			logger.Error("invalid sasl mechanism \"%s\": can only be \"scram-sha256\", \"scram-sha512\" or \"plain\"", opts.saslMechanism)
 		}
 
-		config.Net.SASL.Enable = true
-		config.Net.SASL.Handshake = opts.useSASLHandshake
+		//config.Net.SASL.Handshake = opts.useSASLHandshake
 
-		if opts.saslUsername != "" {
-			config.Net.SASL.User = opts.saslUsername
-		}
-
-		if opts.saslPassword != "" {
-			config.Net.SASL.Password = opts.saslPassword
-		}
 	}
 
 	if opts.useTLS {
@@ -164,51 +177,42 @@ func NewExporter(opts kafkaOpts, topicFilter string, groupFilter string) (*Expor
 			if ca, err := ioutil.ReadFile(opts.tlsCAFile); err == nil {
 				config.Net.TLS.Config.RootCAs.AppendCertsFromPEM(ca)
 			} else {
-				plog.Fatalln(err)
+				logger.Error(err.Error())
 			}
 		}
 
 		canReadCertAndKey, err := CanReadCertAndKey(opts.tlsCertFile, opts.tlsKeyFile)
 		if err != nil {
-			plog.Fatalln(err)
+			logger.Error(err.Error())
 		}
 		if canReadCertAndKey {
 			cert, err := tls.LoadX509KeyPair(opts.tlsCertFile, opts.tlsKeyFile)
 			if err == nil {
 				config.Net.TLS.Config.Certificates = []tls.Certificate{cert}
 			} else {
-				plog.Fatalln(err)
+				logger.Error(err.Error())
 			}
 		}
 	}
 
-	if opts.useZooKeeperLag {
-		zookeeperClient, err = kazoo.NewKazoo(opts.uriZookeeper, nil)
-	}
-
-	interval, err := time.ParseDuration(opts.metadataRefreshInterval)
+	err = config.Validate()
 	if err != nil {
-		plog.Errorln("Cannot parse metadata refresh interval")
+		logger.Error("%s", err.Error())
 		panic(err)
 	}
-
-	config.Metadata.RefreshFrequency = interval
-
-	client, err := sarama.NewClient(opts.uri, config)
+	client, err := sarama.NewClient(strings.Split(opts.uri, ","), config)
 
 	if err != nil {
-		plog.Errorln("Error Init Kafka Client")
+		logger.Error("Error Init Kafka Client %s", err.Error())
 		panic(err)
 	}
-	plog.Infoln("Done Init Clients")
+	logger.Info("Done Init Clients")
 
 	// Init our exporter.
 	return &Exporter{
 		client:                  client,
 		topicFilter:             regexp.MustCompile(topicFilter),
 		groupFilter:             regexp.MustCompile(groupFilter),
-		useZooKeeperLag:         opts.useZooKeeperLag,
-		zookeeperClient:         zookeeperClient,
 		nextMetadataRefresh:     time.Now(),
 		metadataRefreshInterval: interval,
 	}, nil
@@ -246,10 +250,10 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 	now := time.Now()
 
 	if now.After(e.nextMetadataRefresh) {
-		plog.Info("Refreshing client metadata")
+		logger.Info("Refreshing client metadata")
 
 		if err := e.client.RefreshMetadata(); err != nil {
-			plog.Errorf("Cannot refresh topics, using cached data: %v", err)
+			logger.Error("Cannot refresh topics, using cached data: %v", err)
 		}
 
 		e.nextMetadataRefresh = now.Add(e.metadataRefreshInterval)
@@ -257,7 +261,7 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 
 	topics, err := e.client.Topics()
 	if err != nil {
-		plog.Errorf("Cannot get topics: %v", err)
+		logger.Error("Cannot get topics: %v", err)
 		return
 	}
 
@@ -266,7 +270,7 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 		if e.topicFilter.MatchString(topic) {
 			partitions, err := e.client.Partitions(topic)
 			if err != nil {
-				plog.Errorf("Cannot get partitions of topic %s: %v", topic, err)
+				logger.Error("Cannot get partitions of topic %s: %v", topic, err)
 				return
 			}
 			ch <- prometheus.MustNewConstMetric(
@@ -278,7 +282,7 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 			for _, partition := range partitions {
 				broker, err := e.client.Leader(topic, partition)
 				if err != nil {
-					plog.Errorf("Cannot get leader of topic %s partition %d: %v", topic, partition, err)
+					logger.Error("Cannot get leader of topic %s partition %d: %v", topic, partition, err)
 				} else {
 					ch <- prometheus.MustNewConstMetric(
 						topicPartitionLeader, prometheus.GaugeValue, float64(broker.ID()), topic, strconv.FormatInt(int64(partition), 10),
@@ -287,7 +291,7 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 
 				currentOffset, err := e.client.GetOffset(topic, partition, sarama.OffsetNewest)
 				if err != nil {
-					plog.Errorf("Cannot get current offset of topic %s partition %d: %v", topic, partition, err)
+					logger.Error("Cannot get current offset of topic %s partition %d: %v", topic, partition, err)
 				} else {
 					e.mu.Lock()
 					offset[topic][partition] = currentOffset
@@ -299,7 +303,7 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 
 				oldestOffset, err := e.client.GetOffset(topic, partition, sarama.OffsetOldest)
 				if err != nil {
-					plog.Errorf("Cannot get oldest offset of topic %s partition %d: %v", topic, partition, err)
+					logger.Error("Cannot get oldest offset of topic %s partition %d: %v", topic, partition, err)
 				} else {
 					ch <- prometheus.MustNewConstMetric(
 						topicOldestOffset, prometheus.GaugeValue, float64(oldestOffset), topic, strconv.FormatInt(int64(partition), 10),
@@ -308,7 +312,7 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 
 				replicas, err := e.client.Replicas(topic, partition)
 				if err != nil {
-					plog.Errorf("Cannot get replicas of topic %s partition %d: %v", topic, partition, err)
+					logger.Error("Cannot get replicas of topic %s partition %d: %v", topic, partition, err)
 				} else {
 					ch <- prometheus.MustNewConstMetric(
 						topicPartitionReplicas, prometheus.GaugeValue, float64(len(replicas)), topic, strconv.FormatInt(int64(partition), 10),
@@ -317,7 +321,7 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 
 				inSyncReplicas, err := e.client.InSyncReplicas(topic, partition)
 				if err != nil {
-					plog.Errorf("Cannot get in-sync replicas of topic %s partition %d: %v", topic, partition, err)
+					logger.Error("Cannot get in-sync replicas of topic %s partition %d: %v", topic, partition, err)
 				} else {
 					ch <- prometheus.MustNewConstMetric(
 						topicPartitionInSyncReplicas, prometheus.GaugeValue, float64(len(inSyncReplicas)), topic, strconv.FormatInt(int64(partition), 10),
@@ -344,24 +348,24 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 					)
 				}
 
-				if e.useZooKeeperLag {
-					ConsumerGroups, err := e.zookeeperClient.Consumergroups()
-
-					if err != nil {
-						plog.Errorf("Cannot get consumer group %v", err)
-					}
-
-					for _, group := range ConsumerGroups {
-						offset, _ := group.FetchOffset(topic, partition)
-						if offset > 0 {
-
-							consumerGroupLag := currentOffset - offset
-							ch <- prometheus.MustNewConstMetric(
-								consumergroupLagZookeeper, prometheus.GaugeValue, float64(consumerGroupLag), group.Name, topic, strconv.FormatInt(int64(partition), 10),
-							)
-						}
-					}
-				}
+				//if e.useZooKeeperLag {
+				//	ConsumerGroups, err := e.zookeeperClient.Consumergroups()
+				//
+				//	if err != nil {
+				//		logger.Error("Cannot get consumer group %v", err)
+				//	}
+				//
+				//	for _, group := range ConsumerGroups {
+				//		offset, _ := group.FetchOffset(topic, partition)
+				//		if offset > 0 {
+				//
+				//			consumerGroupLag := currentOffset - offset
+				//			ch <- prometheus.MustNewConstMetric(
+				//				consumergroupLagZookeeper, prometheus.GaugeValue, float64(consumerGroupLag), group.Name, topic, strconv.FormatInt(int64(partition), 10),
+				//			)
+				//		}
+				//	}
+				//}
 			}
 		}
 	}
@@ -376,14 +380,14 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 	getConsumerGroupMetrics := func(broker *sarama.Broker) {
 		defer wg.Done()
 		if err := broker.Open(e.client.Config()); err != nil && err != sarama.ErrAlreadyConnected {
-			plog.Errorf("Cannot connect to broker %d: %v", broker.ID(), err)
+			logger.Error("Cannot connect to broker %d: %v", broker.ID(), err)
 			return
 		}
 		defer broker.Close()
 
 		groups, err := broker.ListGroups(&sarama.ListGroupsRequest{})
 		if err != nil {
-			plog.Errorf("Cannot get consumer group: %v", err)
+			logger.Error("Cannot get consumer group: %v", err)
 			return
 		}
 		groupIds := make([]string, 0)
@@ -395,7 +399,7 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 
 		describeGroups, err := broker.DescribeGroups(&sarama.DescribeGroupsRequest{Groups: groupIds})
 		if err != nil {
-			plog.Errorf("Cannot get describe groups: %v", err)
+			logger.Error("Cannot get describe groups: %v", err)
 			return
 		}
 		for _, group := range describeGroups.Groups {
@@ -409,7 +413,7 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 				consumergroupMembers, prometheus.GaugeValue, float64(len(group.Members)), group.GroupId,
 			)
 			if offsetFetchResponse, err := broker.FetchOffset(&offsetFetchRequest); err != nil {
-				plog.Errorf("Cannot get offset of group %s: %v", group.GroupId, err)
+				logger.Error("Cannot get offset of group %s: %v", group.GroupId, err)
 			} else {
 				for topic, partitions := range offsetFetchResponse.Blocks {
 					// If the topic is not consumed by that consumer group, skip it
@@ -427,7 +431,7 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 						for partition, offsetFetchResponseBlock := range partitions {
 							err := offsetFetchResponseBlock.Err
 							if err != sarama.ErrNoError {
-								plog.Errorf("Error for  partition %d :%v", partition, err.Error())
+								logger.Error("Error for  partition %d :%v", partition, err.Error())
 								continue
 							}
 							currentOffset := offsetFetchResponseBlock.Offset
@@ -450,7 +454,7 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 									consumergroupLag, prometheus.GaugeValue, float64(lag), group.GroupId, topic, strconv.FormatInt(int64(partition), 10),
 								)
 							} else {
-								plog.Errorf("No offset of topic %s partition %d, cannot get consumer group lag", topic, partition)
+								logger.Error("No offset of topic %s partition %d, cannot get consumer group lag", topic, partition)
 							}
 							e.mu.Unlock()
 						}
@@ -473,49 +477,108 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 		}
 		wg.Wait()
 	} else {
-		plog.Errorln("No valid broker, cannot get consumer group metrics")
+		logger.Error("No valid broker, cannot get consumer group metrics")
 	}
 }
 
+var logger *logs.BeeLogger
+
 func init() {
+	logger = logs.NewLogger(1000)
+	logger.SetLogger("console", "")
+	logger.EnableFuncCallDepth(true)
 	metrics.UseNilMetrics = true
 	prometheus.MustRegister(version.NewCollector("kafka_exporter"))
 }
+func GetStringDefault( key,def string  ) string {
+	v:=viper.GetString(key)
+	if v ==""{
+		return def
+	}
+	return v
+}
+func GetBool( key string ) bool {
+	v:=viper.GetBool(key)
 
+	return v
+}
 func main() {
+	viper.SetConfigName("kafka_exporter")   // name of config file (without extension)
+	viper.AddConfigPath("./") // optionally look for config in the working directory
+	err := viper.ReadInConfig()     // Find and read the config file
+	if err != nil {                 // Handle errors reading the config file
+
+		panic(fmt.Errorf("Fatal error config file: %s \n", err))
+	}
 	var (
-		listenAddress = kingpin.Flag("web.listen-address", "Address to listen on for web interface and telemetry.").Default(":9308").String()
-		metricsPath   = kingpin.Flag("web.telemetry-path", "Path under which to expose metrics.").Default("/metrics").String()
-		topicFilter   = kingpin.Flag("topic.filter", "Regex that determines which topics to collect.").Default(".*").String()
-		groupFilter   = kingpin.Flag("group.filter", "Regex that determines which consumer groups to collect.").Default(".*").String()
-		logSarama     = kingpin.Flag("log.enable-sarama", "Turn on Sarama logging.").Default("false").Bool()
+		listenAddress = GetStringDefault("web.listen-address",":9308")
+
+		metricsPath = GetStringDefault("web.telemetry-path","/metrics")
+		topicFilter = GetStringDefault("topic.filter",".*")
+		groupFilter = GetStringDefault("group.filter",".*")
+		logSarama   = GetBool("log.enable-sarama") //kingpin.Flag("log.enable-sarama", "Turn on Sarama logging.").Default("false").Bool()
 
 		opts = kafkaOpts{}
 	)
-	kingpin.Flag("kafka.server", "Address (host:port) of Kafka server.").Default("kafka:9092").StringsVar(&opts.uri)
-	kingpin.Flag("sasl.enabled", "Connect using SASL/PLAIN.").Default("false").BoolVar(&opts.useSASL)
-	kingpin.Flag("sasl.handshake", "Only set this to false if using a non-Kafka SASL proxy.").Default("true").BoolVar(&opts.useSASLHandshake)
-	kingpin.Flag("sasl.username", "SASL user name.").Default("").StringVar(&opts.saslUsername)
-	kingpin.Flag("sasl.password", "SASL user password.").Default("").StringVar(&opts.saslPassword)
-	kingpin.Flag("sasl.mechanism", "The SASL SCRAM SHA algorithm sha256 or sha512 as mechanism").Default("").StringVar(&opts.saslMechanism)
-	kingpin.Flag("tls.enabled", "Connect using TLS.").Default("false").BoolVar(&opts.useTLS)
-	kingpin.Flag("tls.ca-file", "The optional certificate authority file for TLS client authentication.").Default("").StringVar(&opts.tlsCAFile)
-	kingpin.Flag("tls.cert-file", "The optional certificate file for client authentication.").Default("").StringVar(&opts.tlsCertFile)
-	kingpin.Flag("tls.key-file", "The optional key file for client authentication.").Default("").StringVar(&opts.tlsKeyFile)
-	kingpin.Flag("tls.insecure-skip-tls-verify", "If true, the server's certificate will not be checked for validity. This will make your HTTPS connections insecure.").Default("false").BoolVar(&opts.tlsInsecureSkipTLSVerify)
-	kingpin.Flag("kafka.version", "Kafka broker version").Default(sarama.V1_0_0_0.String()).StringVar(&opts.kafkaVersion)
-	kingpin.Flag("use.consumelag.zookeeper", "if you need to use a group from zookeeper").Default("false").BoolVar(&opts.useZooKeeperLag)
-	kingpin.Flag("zookeeper.server", "Address (hosts) of zookeeper server.").Default("localhost:2181").StringsVar(&opts.uriZookeeper)
-	kingpin.Flag("kafka.labels", "Kafka cluster name").Default("").StringVar(&opts.labels)
-	kingpin.Flag("refresh.metadata", "Metadata refresh interval").Default("30s").StringVar(&opts.metadataRefreshInterval)
+	opts.uri = GetStringDefault("kafka.server","kafka:9092")
+	opts.useSASL = viper.GetBool("sasl.enabled")
+	opts.useSASLHandshake = viper.GetBool("sasl.handshake")
+	opts.saslUsername = GetStringDefault("sasl.username","")
+	opts.saslPassword = GetStringDefault("sasl.password","")
+	opts.saslMechanism = GetStringDefault("sasl.mechanism","scram-sha512")
+	opts.useTLS = viper.GetBool("tls.enabled")
+	opts.tlsCAFile = GetStringDefault("tls.ca-file","")
+	opts.tlsCertFile = GetStringDefault("tls.cert-file","")
+	opts.tlsKeyFile = GetStringDefault("tls.key-file","")
+	opts.tlsInsecureSkipTLSVerify = viper.GetBool("tls.insecure-skip-tls-verify")
+	opts.kafkaVersion = GetStringDefault("kafka.version",sarama.V1_0_0_0.String())
+	opts.labels = GetStringDefault("kafka.labels","")
+	opts.metadataRefreshInterval = GetStringDefault("refresh.metadata","30s")
+	//pflag.StringVar(&listenAddress, "web.listen-address", ":9308", "Address to listen on for web interface and telemetry.")
+	//pflag.StringVar(&metricsPath, "web.telemetry-path", "/metrics", "Path under which to expose metrics.")
+	//pflag.StringVar(&topicFilter, "topic.filter", ".*", "Regex that determines which topics to collect.")
+	//pflag.StringVar(&groupFilter, "group.filter", ".*", "Regex that determines which consumer groups to collect.")
+	//pflag.BoolVar(&logSarama, "log.enable-sarama", false, "Turn on Sarama logging.")
 
-	plog.AddFlags(kingpin.CommandLine)
-	kingpin.Version(version.Print("kafka_exporter"))
-	kingpin.HelpFlag.Short('h')
-	kingpin.Parse()
+	//pflag.StringVar(&opts.uri, "kafka.server", "kafka:9092", "Address (host:port) of Kafka server.")
+	//pflag.BoolVar(&opts.useSASL, "sasl.enabled", false, "Connect using SASL/PLAIN.")
+	//pflag.BoolVar(&opts.useSASLHandshake, "sasl.handshake", false, "Only set this to false if using a non-Kafka SASL proxy.")
+	//pflag.StringVar(&opts.saslUsername, "sasl.username", "", "SASL user name.")
+	//pflag.StringVar(&opts.saslPassword, "sasl.password", "", "SASL user password.")
+	//pflag.StringVar(&opts.saslMechanism, "sasl.mechanism", "scram-sha512", "The SASL SCRAM SHA algorithm sha256 or sha512 as mechanism")
+	//pflag.BoolVar(&opts.useTLS, "tls.enabled", false, "Connect using TLS.")
+	//pflag.StringVar(&opts.tlsCAFile, "tls.ca-file", "", "The optional certificate authority file for TLS client authentication.")
+	//pflag.StringVar(&opts.tlsCertFile, "tls.cert-file", "", "The optional certificate file for client authentication.")
+	//pflag.StringVar(&opts.tlsKeyFile, "tls.key-file", "", "The optional key file for client authentication.")
+	//pflag.BoolVar(&opts.tlsInsecureSkipTLSVerify, "tls.insecure-skip-tls-verify", false, "If true, the server's certificate will not be checked for validity. This will make your HTTPS connections insecure.")
+	//pflag.StringVar(&opts.kafkaVersion, "kafka.version", sarama.V1_0_0_0.String(), "Kafka broker version")
 
-	plog.Infoln("Starting kafka_exporter", version.Info())
-	plog.Infoln("Build context", version.BuildContext())
+	//pflag.StringVar(&opts.labels, "kafka.labels", "", "Kafka cluster name")
+	//pflag.StringVar(&opts.metadataRefreshInterval, "refresh.metadata", "30s", "Metadata refresh interval")
+	//kingpin.Flag("kafka.server", "Address (host:port) of Kafka server.").Default(os.Getenv("KAFKA_SERVER")).StringsVar(&opts.uri)
+	//kingpin.Flag("sasl.enabled", "Connect using SASL/PLAIN.").Default(os.Getenv("SASL_ENABLED")).BoolVar(&opts.useSASL)
+	//kingpin.Flag("sasl.handshake", "Only set this to false if using a non-Kafka SASL proxy.").Default("true").BoolVar(&opts.useSASLHandshake)
+	//kingpin.Flag("sasl.username", "SASL user name.").Default(os.Getenv("KAFKA_USERNAME")).StringVar(&opts.saslUsername)
+	//kingpin.Flag("sasl.password", "SASL user password.").Default(os.Getenv("KAFKA_PASSWORD")).StringVar(&opts.saslPassword)
+	//kingpin.Flag("sasl.mechanism", "The SASL SCRAM SHA algorithm sha256 or sha512 as mechanism").Default("").StringVar(&opts.saslMechanism)
+	//kingpin.Flag("tls.enabled", "Connect using TLS.").Default("false").BoolVar(&opts.useTLS)
+	//kingpin.Flag("tls.ca-file", "The optional certificate authority file for TLS client authentication.").Default("").StringVar(&opts.tlsCAFile)
+	//kingpin.Flag("tls.cert-file", "The optional certificate file for client authentication.").Default("").StringVar(&opts.tlsCertFile)
+	//kingpin.Flag("tls.key-file", "The optional key file for client authentication.").Default("").StringVar(&opts.tlsKeyFile)
+	//kingpin.Flag("tls.insecure-skip-tls-verify", "If true, the server's certificate will not be checked for validity. This will make your HTTPS connections insecure.").Default("false").BoolVar(&opts.tlsInsecureSkipTLSVerify)
+	//kingpin.Flag("kafka.version", "Kafka broker version").Default(sarama.V1_0_0_0.String()).StringVar(&opts.kafkaVersion)
+	//kingpin.Flag("use.consumelag.zookeeper", "if you need to use a group from zookeeper").Default("false").BoolVar(&opts.useZooKeeperLag)
+	//kingpin.Flag("zookeeper.server", "Address (hosts) of zookeeper server.").Default(os.Getenv("ZOOKEEPER_SERVER")).StringsVar(&opts.uriZookeeper)
+	//kingpin.Flag("kafka.labels", "Kafka cluster name").Default("").StringVar(&opts.labels)
+	//kingpin.Flag("refresh.metadata", "Metadata refresh interval").Default("30s").StringVar(&opts.metadataRefreshInterval)
+
+	//plog.AddFlags(kingpin.CommandLine)
+	//kingpin.Version(version.Print("kafka_exporter"))
+	//kingpin.HelpFlag.Short('h')
+	//pflag.Parse()
+
+	logger.Info("Starting kafka_exporter %s", version.Info())
+	logger.Info("Build context %s", version.BuildContext())
 
 	labels := make(map[string]string)
 
@@ -616,28 +679,32 @@ func main() {
 		[]string{"consumergroup"}, labels,
 	)
 
-	if *logSarama {
+	if logSarama {
 		sarama.Logger = log.New(os.Stdout, "[sarama] ", log.LstdFlags)
 	}
 
-	exporter, err := NewExporter(opts, *topicFilter, *groupFilter)
+	exporter, err := NewExporter(opts, topicFilter, groupFilter)
 	if err != nil {
-		plog.Fatalln(err)
+		logger.Error(err.Error())
 	}
 	defer exporter.client.Close()
 	prometheus.MustRegister(exporter)
 
-	http.Handle(*metricsPath, promhttp.Handler())
+	http.Handle(metricsPath, promhttp.Handler())
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`<html>
 	        <head><title>Kafka Exporter</title></head>
 	        <body>
 	        <h1>Kafka Exporter</h1>
-	        <p><a href='` + *metricsPath + `'>Metrics</a></p>
+	        <p><a href='` + metricsPath + `'>Metrics</a></p>
 	        </body>
 	        </html>`))
 	})
 
-	plog.Infoln("Listening on", *listenAddress)
-	plog.Fatal(http.ListenAndServe(*listenAddress, nil))
+	logger.Info("Listening on %s", listenAddress)
+	err = http.ListenAndServe(listenAddress, nil)
+	if err != nil {
+		logger.Error(err.Error())
+	}
+
 }

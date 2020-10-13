@@ -1,0 +1,56 @@
+
+#Address to listen on for web interface and telemetry.
+web.listen-address: :9308
+#Path under which to expose metrics.
+web.telemetry-path: /metrics
+
+#Regex that determines which topics to collect.
+topic.filter: .*
+
+#Regex that determines which consumer groups to collect.
+group.filter: .*
+
+#Turn on Sarama logging.
+log.enable-sarama: false
+
+#Address (host:port) of Kafka server.
+kafka.server: 10.251.80.11:9092
+
+#Connect using SASL/PLAIN.
+sasl.enabled: false
+
+#Only set this to false if using a non-Kafka SASL proxy.
+sasl.handshake: false
+
+#SASL user name.
+sasl.username: scada
+
+#SASL user password.
+sasl.password: 8nJ8hyYDRcUZ2kn
+
+#The SASL SCRAM SHA algorithm sha256 or sha512 as mechanism
+sasl.mechanism: scram-sha512
+
+#Connect using TLS.
+tls.enabled: false
+
+#The optional certificate authority file for TLS client authentication.
+tls.ca-file:
+
+#The optional certificate file for client authentication.
+tls.cert-file:
+
+#The optional key file for client authentication.
+tls.key-file:
+
+#If true, the server's certificate will not be checked for validity. This will make your HTTPS connections insecure.
+tls.insecure-skip-tls-verify:
+
+#Kafka broker version
+kafka.version: 1.0.0
+
+#Kafka cluster name
+kafka.labels:
+
+#Metadata refresh interval
+refresh.metadata:
