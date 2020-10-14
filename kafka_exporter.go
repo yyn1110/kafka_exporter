@@ -19,9 +19,10 @@ import (
 	"crypto/x509"
 	"github.com/astaxie/beego/logs"
 	"github.com/prometheus/common/version"
-	"github.com/rcrowley/go-metrics"
+
 	"github.com/spf13/viper"
 	"io/ioutil"
+
 )
 
 const (
@@ -487,7 +488,7 @@ func init() {
 	logger = logs.NewLogger(1000)
 	logger.SetLogger("console", "")
 	logger.EnableFuncCallDepth(true)
-	metrics.UseNilMetrics = true
+
 	prometheus.MustRegister(version.NewCollector("kafka_exporter"))
 }
 func GetStringDefault( key,def string  ) string {
@@ -504,7 +505,7 @@ func GetBool( key string ) bool {
 }
 func main() {
 	viper.SetConfigName("kafka_exporter")   // name of config file (without extension)
-	viper.AddConfigPath("./") // optionally look for config in the working directory
+	viper.AddConfigPath("/etc") // optionally look for config in the working directory
 	err := viper.ReadInConfig()     // Find and read the config file
 	if err != nil {                 // Handle errors reading the config file
 

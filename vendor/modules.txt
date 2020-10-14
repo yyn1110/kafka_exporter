@@ -89,7 +89,7 @@ golang.org/x/crypto/pbkdf2
 # golang.org/x/net v0.0.0-20201010224723-4f7140c49acb
 golang.org/x/net/internal/socks
 golang.org/x/net/proxy
-# golang.org/x/sys v0.0.0-20201013064817-56aa3af1a10a
+# golang.org/x/sys v0.0.0-20201013081832-0aaa2718063a
 golang.org/x/sys/internal/unsafeheader
 golang.org/x/sys/unix
 golang.org/x/sys/windows
