@@ -23,10 +23,10 @@ sasl.enabled: false
 sasl.handshake: false
 
 #SASL user name.
-sasl.username: scada
+sasl.username:
 
 #SASL user password.
-sasl.password: 8nJ8hyYDRcUZ2kn
+sasl.password:
 
 #The SASL SCRAM SHA algorithm sha256 or sha512 as mechanism
 sasl.mechanism: scram-sha512
